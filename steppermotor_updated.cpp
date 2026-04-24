@@ -10,12 +10,15 @@
 #define dir 8
 #define BAUDRATE 115200
 #define SYNC_BYTE 0xAA
+#define VOLT_PIN A0
 
 // --- Global State ---
 int isPulseTrain = 0;       // 0: Stopped, 1: Running
 int push = 1;               // 1: Infuse (Forward), 0: Refill (Reverse)
 uint32_t delay_time = 3720; // Default: 4 mm/min in microseconds
 uint16_t current_mm_min = 1;
+const float LIMIT_PULL_VOLT = 2.73; // Threshold to switch to Push
+const float LIMIT_PUSH_VOLT = 0.39; // Threshold to switch to Pull
 
 void setup()
 {
@@ -25,6 +28,7 @@ void setup()
     pinMode(ms2, OUTPUT);
     pinMode(step, OUTPUT);
     pinMode(dir, OUTPUT);
+    pinMode(A0, INPUT);
 
     // Set 1/8th Microstepping
     digitalWrite(ms1, HIGH);
@@ -32,7 +36,22 @@ void setup()
 }
 
 // --- High Precision Movement ---
+void checkVoltageLimits()
+{
+    int raw = analogRead(VOLT_PIN);
+    float currentVolt = (raw * 5.0) / 1023.0;
 
+    // Logic Trigger 1: Reaches end of Pull -> Switch to Push
+    if (push == 0 && currentVolt >= LIMIT_PULL_VOLT)
+    {
+        push = 1;
+    }
+    // Logic Trigger 2: Reaches end of Push -> Switch to Pull
+    else if (push == 1 && currentVolt <= LIMIT_PUSH_VOLT)
+    {
+        push = 0;
+    }
+}
 void dirPull()
 {
     // Fast Retraction Logic
@@ -75,6 +94,7 @@ void dirPush()
 
 void executeMovement()
 {
+    checkVoltageLimits();
     if (push == 1)
     {
         dirPush();
@@ -89,6 +109,7 @@ void executeMovement()
 
 void loop()
 {
+
     if (Serial.available() > 0)
     {
         if (Serial.peek() == SYNC_BYTE)
@@ -175,7 +196,7 @@ void handleCommand(int header, int payload[])
         isPulseTrain = 1;
 
         // Match RX Table: Header 0xA2, Length 1
-        sendResponse(0xA2, 1, 0);
+        sendResponse(0xA2, 2, 0);
     }
     else if (header == 0x03)
     {
@@ -230,9 +251,11 @@ void sendResponse(int header, int dataLen, int speed)
         packet[4] = (speedUnits >> 8) & 0xFF;
         packet[5] = speedUnits & 0xFF;
 
-        uint16_t dummyVolt = 1200; // 12.00V
-        packet[6] = (dummyVolt >> 8) & 0xFF;
-        packet[7] = dummyVolt & 0xFF;
+        int raw = analogRead(VOLT_PIN);
+        float liveVolt = (raw * 5.0) / 1023.0;
+        uint16_t voltToSend = (uint16_t)(liveVolt * 100.0); // e.g., 2.73V -> 273
+        packet[6] = (voltToSend >> 8) & 0xFF;
+        packet[7] = voltToSend & 0xFF;
 
         for (int i = 0; i < 8; i++)
         {
@@ -245,7 +268,7 @@ void sendResponse(int header, int dataLen, int speed)
     {
         packet[3] = 0xFF; // Status OK
         packet[4] = (push == 1) ? 0x01 : 0x00;
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 5; i++)
         {
             Serial.write(packet[i]);
             if (i >= 3)
